@@ -1,0 +1,8 @@
+# Lean deployment profile for Streamlit Community Cloud / Render.
+# Optional ML packages live in requirements-full.txt so unused models do not
+# make the investor-facing demo fail during installation.
+streamlit>=1.39,<2
+numpy>=1.26,<3
+pillow>=10,<12
+qrcode[pil]>=7.4,<9
+cryptography>=42,<46

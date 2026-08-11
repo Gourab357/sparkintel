@@ -1,0 +1,410 @@
+"""
+SparkIntel — Streamlit demo app.
+
+Free deployment: Streamlit Community Cloud (https://share.streamlit.io)
+  → push to GitHub, deploy app.py + requirements.txt + trust_verification.py
+     + gru_sequence_model.keras
+
+Paid/alternative: Hugging Face Spaces with Gradio → use app_gradio.py + requirements-gradio.txt
+"""
+import io
+import os
+
+import numpy as np
+import streamlit as st
+from PIL import Image
+
+from trust_verification import (
+    Issuer, VerificationRegistry,
+    make_verification_qr, embed_watermark, extract_watermark,
+)
+
+st.set_page_config(page_title="SparkIntel", page_icon="🛡️", layout="wide")
+
+ARTIFACT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+st.markdown("""
+<style>
+    .stApp { background: linear-gradient(135deg, #f7faff 0%, #ffffff 48%, #f2f7ff 100%); }
+    [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe7f5; border-radius: 12px; padding: 12px; }
+    .spark-note { border-left: 4px solid #0e7490; padding: .4rem .8rem; background: #eff9ff; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def artifact_path(name: str) -> str:
+    return os.path.join(ARTIFACT_DIR, name)
+
+
+st.title("🛡️ SparkIntel")
+st.caption("AI-Powered Detection of Synthetic Media & Phishing Threats in Securities Markets — "
+           "SEBI Securities Market TechSprint prototype")
+
+tab_text, tab_trust, tab_sequence, tab_media = st.tabs([
+    "📧 Text / Circular Check",
+    "🔗 Trust Verification",
+    "🔀 Fraud Journey Sequence",
+    "🎭 Deepfake / Voice Check",
+])
+
+with st.sidebar:
+    st.header("Demo guide")
+    st.caption("Start with Trust Verification, then show how a multi-stage journey becomes high risk.")
+    st.info("Hosted demo mode keeps the core demo reliable without downloading multi-GB models.")
+
+# =============================================================================
+# TAB 1 — Text / Circular Check  (needs notebook 1's saved .joblib artifacts)
+# =============================================================================
+with tab_text:
+    st.subheader("Phishing & Fake-Circular Text Detector")
+    st.caption("Paste an email, WhatsApp forward, or circular. Scores it with SBERT embeddings "
+               "+ a trained classifier, and separately highlights the phrases driving the score.")
+
+    text_artifacts_ok = os.path.exists(artifact_path("phishing_rf_model.joblib"))
+
+    if not text_artifacts_ok:
+        st.info(
+            "**Not set up yet.** Run `01_phishing_text_detector.ipynb` in Colab, then copy its "
+            "3 saved `.joblib` files into this folder (alongside `app.py`) and "
+            "redeploy. This tab lights up automatically once they're present."
+        )
+    else:
+        @st.cache_resource(show_spinner="Loading text models...")
+        def load_text_artifacts():
+            import joblib
+            from sentence_transformers import SentenceTransformer
+            rf = joblib.load(artifact_path("phishing_rf_model.joblib"))
+            tfidf = joblib.load(artifact_path("phishing_tfidf_vectorizer.joblib"))
+            kw_clf = joblib.load(artifact_path("phishing_keyword_model.joblib"))
+            embedder = SentenceTransformer("all-MiniLM-L6-v2")
+            return rf, tfidf, kw_clf, embedder
+
+        try:
+            rf, tfidf, kw_clf, embedder = load_text_artifacts()
+
+            def explain_keywords(text, top_k=6):
+                vec = tfidf.transform([text])
+                idx = vec.nonzero()[1]
+                contrib = [(tfidf.get_feature_names_out()[i], float(vec[0, i] * kw_clf.coef_[0, i])) for i in idx]
+                contrib.sort(key=lambda t: -abs(t[1]))
+                return contrib[:top_k]
+
+            default_example = ("URGENT: Your KYC has expired. Update immediately at this link "
+                                "or your trading account will be frozen within 24 hours.")
+            user_text = st.text_area("Message text", value=default_example, height=140)
+
+            if st.button("Check this message", type="primary", key="check_text"):
+                emb = embedder.encode([user_text])
+                score = float(rf.predict_proba(emb)[0, 1])
+                verdict = ("LIKELY PHISHING" if score > 0.6 else
+                           "SUSPICIOUS" if score > 0.35 else "LIKELY LEGITIMATE")
+
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.metric("Phishing score", f"{score:.2f}")
+                    (st.error if verdict == "LIKELY PHISHING" else
+                     st.warning if verdict == "SUSPICIOUS" else st.success)(verdict)
+                with col2:
+                    st.write("**Phrases driving this score:**")
+                    for phrase, contrib in explain_keywords(user_text):
+                        direction = "toward phishing" if contrib > 0 else "toward legitimate"
+                        st.write(f"- `{phrase}` — {direction} ({contrib:+.3f})")
+        except Exception as e:
+            st.error(f"Text models failed to load: {e}")
+            st.caption("Check requirements.txt includes sentence-transformers, and that all 3 "
+                       ".joblib files from notebook 1 are in this folder.")
+
+# =============================================================================
+# TAB 2 — Trust Verification
+# =============================================================================
+with tab_trust:
+    st.subheader("Authenticity / Trust Verification")
+    st.caption("Layer 2: independent of whether content *looks* synthetic — is this provably, "
+               "cryptographically the thing SEBI / a broker / an exchange actually sent?")
+
+    if "registry" not in st.session_state:
+        st.session_state.registry = VerificationRegistry()
+        st.session_state.issuers = {name: Issuer(name) for name in ("SEBI", "Sample Broker Ltd")}
+        st.session_state.public_keys = {n: i.public_key for n, i in st.session_state.issuers.items()}
+
+    registry = st.session_state.registry
+    issuers = st.session_state.issuers
+    public_keys = st.session_state.public_keys
+
+    sub_issue, sub_verify = st.tabs(["Issue a signed communication", "Verify a message"])
+
+    with sub_issue:
+        issuer_name = st.selectbox("Issuing as", list(issuers.keys()))
+        message = st.text_area("Communication text",
+                                value="Investors are advised that trading hours on the upcoming "
+                                      "holiday remain unchanged.", key="issue_text")
+        if st.button("Sign & register", key="sign_btn"):
+            rec = registry.register(issuers[issuer_name], message, channel="email")
+            st.session_state.last_record_id = rec.record_id
+            st.success(f"Registered. Verification ID: `{rec.record_id}`")
+            qr_img = make_verification_qr(rec)
+            st.image(qr_img, width=180, caption="QR code that would ship in the message footer")
+
+    with sub_verify:
+        st.write("Paste a verification ID and the message text an investor actually received — "
+                 "exactly as they'd do after scanning the QR code or typing in the ID.")
+        check_id = st.text_input("Verification ID", value=st.session_state.get("last_record_id", ""))
+        check_text = st.text_area("Message text received", key="verify_text")
+        if st.button("Verify", key="verify_btn"):
+            result = registry.verify_message(check_id, check_text, public_keys)
+            (st.success(f"✅ {result['status']} — {result['detail']}") if result["authentic"]
+             else st.error(f"❌ {result['status']} — {result['detail']}"))
+
+        st.divider()
+        st.caption("Try it: register a message above, then paste the *exact* text back here to see "
+                   "VERIFIED — or paste the same ID with slightly different/extra text (e.g. an "
+                   "added link) to see CONTENT_MISMATCH: a fraudster reusing a real reference number "
+                   "under tampered content.")
+
+# =============================================================================
+# TAB 3 — Fraud Journey Sequence
+# =============================================================================
+with tab_sequence:
+    st.subheader("Multi-Stage Fraud Journey Detector")
+    st.caption("Build an investor's event sequence and score it as a whole — catches campaigns "
+               "a single-message classifier would miss.")
+
+    FRAUD_EVENTS = ["phishing_email", "suspicious_link_click", "fake_broker_site_visit",
+                     "spoofed_voice_call", "whatsapp_tip", "unauthorized_fund_transfer"]
+    BENIGN_EVENTS = ["legit_broker_email", "portal_login", "statement_download",
+                      "support_call", "app_notification", "authorized_fund_transfer"]
+    EVENT_TYPES = FRAUD_EVENTS + BENIGN_EVENTS
+    CHANNELS = ["email", "sms", "web", "call", "whatsapp", "app"]
+    EVENT_CHANNEL = {
+        "phishing_email": "email", "suspicious_link_click": "web",
+        "fake_broker_site_visit": "web", "spoofed_voice_call": "call",
+        "whatsapp_tip": "whatsapp", "unauthorized_fund_transfer": "app",
+        "legit_broker_email": "email", "portal_login": "web",
+        "statement_download": "web", "support_call": "call",
+        "app_notification": "app", "authorized_fund_transfer": "app",
+    }
+    SCORE_PROFILE = {
+        "phishing_email":             (0.70, 0.18, 0.10, 0.08, 0.60, 0.20),
+        "suspicious_link_click":      (0.30, 0.15, 0.10, 0.08, 0.65, 0.18),
+        "fake_broker_site_visit":     (0.25, 0.15, 0.10, 0.08, 0.70, 0.18),
+        "spoofed_voice_call":         (0.15, 0.10, 0.65, 0.18, 0.15, 0.10),
+        "whatsapp_tip":               (0.50, 0.20, 0.10, 0.08, 0.45, 0.20),
+        "unauthorized_fund_transfer": (0.20, 0.12, 0.20, 0.12, 0.30, 0.15),
+        "legit_broker_email":         (0.15, 0.10, 0.08, 0.06, 0.12, 0.08),
+        "portal_login":               (0.08, 0.06, 0.08, 0.05, 0.08, 0.05),
+        "statement_download":         (0.08, 0.06, 0.08, 0.05, 0.08, 0.05),
+        "support_call":               (0.08, 0.06, 0.15, 0.08, 0.08, 0.05),
+        "app_notification":           (0.08, 0.06, 0.08, 0.05, 0.08, 0.05),
+        "authorized_fund_transfer":   (0.08, 0.06, 0.08, 0.05, 0.08, 0.05),
+    }
+    EVENT2IDX = {e: i for i, e in enumerate(EVENT_TYPES)}
+    CHANNEL2IDX = {c: i for i, c in enumerate(CHANNELS)}
+    N_EVENT, N_CHANNEL = len(EVENT_TYPES), len(CHANNELS)
+    FEAT_DIM = N_EVENT + N_CHANNEL + 3 + 1
+    MAX_LEN = 12
+    PAD_VALUE = 0.0
+
+    def event_vector(event_type, hours_since_prev, rng):
+        vec = np.zeros(FEAT_DIM, dtype=np.float32)
+        vec[EVENT2IDX[event_type]] = 1.0
+        vec[N_EVENT + CHANNEL2IDX[EVENT_CHANNEL[event_type]]] = 1.0
+        pm, ps, vm, vs, um, us = SCORE_PROFILE[event_type]
+        scores = rng.normal([pm, vm, um], [ps, vs, us])
+        vec[N_EVENT + N_CHANNEL: N_EVENT + N_CHANNEL + 3] = np.clip(scores, 0, 1)
+        vec[-1] = np.log1p(hours_since_prev)
+        return vec
+
+    def logit(p, eps=1e-6):
+        p = min(max(p, eps), 1 - eps)
+        return float(np.log(p / (1 - p)))
+
+    def render_hosted_journey():
+        """Dependency-free fallback used by the free hosted demo."""
+        st.info("Hosted demo mode: transparent risk scoring is active. Install "
+                "requirements-full.txt on a dedicated server to use the TensorFlow model.")
+        if "journey" not in st.session_state:
+            st.session_state.journey = []
+        left, middle, right = st.columns([2, 1, 1])
+        with left:
+            event = st.selectbox("Event type", EVENT_TYPES, key="hosted_event")
+        with middle:
+            gap = st.number_input("Hours since previous", min_value=0.0, value=1.0,
+                                  step=0.5, key="hosted_gap")
+        with right:
+            st.write("")
+            st.write("")
+            if st.button("Add to journey", key="hosted_add",
+                         disabled=len(st.session_state.journey) >= MAX_LEN):
+                st.session_state.journey.append((event, gap))
+                st.rerun()
+        if not st.session_state.journey:
+            return
+        st.write("**Current journey:** " + " -> ".join(
+            f"{event} (+{gap:.1f}h)" for event, gap in st.session_state.journey))
+        clear, score = st.columns(2)
+        with clear:
+            if st.button("Clear journey", key="hosted_clear"):
+                st.session_state.journey = []
+                st.rerun()
+        with score:
+            score_clicked = st.button("Score this journey", type="primary", key="hosted_score")
+        if score_clicked:
+            fraud_events = [event for event, _ in st.session_state.journey if event in FRAUD_EVENTS]
+            escalation = sum(event in {"suspicious_link_click", "fake_broker_site_visit",
+                                        "unauthorized_fund_transfer"} for event in fraud_events)
+            risk = min(0.98, 0.08 + 0.18 * len(fraud_events) + 0.10 * escalation)
+            st.metric("Fraud-campaign score", f"{risk:.3f}")
+            (st.error if risk > 0.5 else st.success)(
+                "LIKELY FRAUD CAMPAIGN" if risk > 0.5 else "LIKELY BENIGN ACTIVITY")
+            st.write("**Risk drivers:** " + (", ".join(fraud_events) if fraud_events
+                     else "no high-risk stages detected"))
+
+    sequence_model_ok = os.path.exists(artifact_path("gru_sequence_model.keras"))
+
+    if not sequence_model_ok:
+        st.info(
+            "**Not set up yet.** Run `04_fraud_sequence_model.ipynb` in Colab, copy "
+            "`gru_sequence_model.keras` into this folder, and redeploy."
+        )
+    else:
+        @st.cache_resource(show_spinner="Loading sequence model...")
+        def load_sequence_model():
+            import tensorflow as tf
+            return tf.keras.models.load_model(artifact_path("gru_sequence_model.keras"))
+
+        try:
+            seq_model = load_sequence_model()
+            if "journey" not in st.session_state:
+                st.session_state.journey = []
+
+            st.write("Add events in the order they happened (max 12):")
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                new_event = st.selectbox("Event type", EVENT_TYPES, key="new_event_select")
+            with col2:
+                gap_hours = st.number_input("Hours since previous", min_value=0.0, value=1.0, step=0.5)
+            with col3:
+                st.write("")
+                st.write("")
+                add_disabled = len(st.session_state.journey) >= MAX_LEN
+                if st.button("Add to journey", disabled=add_disabled):
+                    st.session_state.journey.append((new_event, gap_hours))
+                    st.rerun()
+
+            if st.session_state.journey:
+                st.write("**Current journey:** " +
+                          " → ".join(f"{e} (+{g:.1f}h)" for e, g in st.session_state.journey))
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button("Clear journey"):
+                        st.session_state.journey = []
+                        st.rerun()
+                with col_b:
+                    score_clicked = st.button("Score this journey", type="primary")
+
+                if score_clicked:
+                    rng = np.random.default_rng(0)
+                    events = [e for e, _ in st.session_state.journey]
+                    gaps = [g for _, g in st.session_state.journey]
+                    vecs = [event_vector(e, g, rng) for e, g in zip(events, gaps)]
+                    padded = np.full((MAX_LEN, FEAT_DIM), PAD_VALUE, dtype=np.float32)
+                    padded[: len(vecs)] = vecs
+                    prob = float(seq_model.predict(padded[None, ...], verbose=0)[0, 0])
+                    verdict = "LIKELY FRAUD CAMPAIGN" if prob > 0.5 else "LIKELY BENIGN ACTIVITY"
+
+                    st.metric("Fraud-campaign score", f"{prob:.3f}")
+                    (st.error if prob > 0.5 else st.success)(verdict)
+
+                    base = logit(prob)
+                    impacts = []
+                    for i, ev in enumerate(events):
+                        occluded = padded.copy()
+                        occluded[i] = PAD_VALUE
+                        s = logit(float(seq_model.predict(occluded[None, ...], verbose=0)[0, 0]))
+                        impacts.append((ev, base - s))
+                    impacts.sort(key=lambda t: -t[1])
+
+                    st.write("**Which stages drove this score:**")
+                    for ev, impact in impacts:
+                        st.write(f"- `{ev}`  Δ={impact:+.2f}")
+        except (ImportError, ModuleNotFoundError):
+            render_hosted_journey()
+        except Exception as e:
+            st.warning(f"Sequence model unavailable: {e}")
+            render_hosted_journey()
+
+# =============================================================================
+# TAB 4 — Deepfake / Voice Check
+# =============================================================================
+with tab_media:
+    st.subheader("Deepfake Image & Voice Clone Check")
+    st.caption("Loads pretrained Hugging Face models directly — no local artifacts needed.")
+
+    media_kind = st.radio("Check a:", ["Image", "Audio clip"], horizontal=True)
+
+    if media_kind == "Image":
+        DEEPFAKE_MODEL_IDS = ["prithivMLmods/Deep-Fake-Detector-v2-Model",
+                               "dima806/deepfake_vs_real_image_detection"]
+
+        @st.cache_resource(show_spinner="Loading deepfake-image model...")
+        def load_deepfake_pipe():
+            from transformers import pipeline
+            last_err = None
+            for model_id in DEEPFAKE_MODEL_IDS:
+                try:
+                    return pipeline("image-classification", model=model_id), model_id
+                except Exception as e:
+                    last_err = e
+            raise RuntimeError(f"No candidate model loaded. Last error: {last_err}")
+
+        uploaded = st.file_uploader("Upload an image (e.g. a frame pulled from a video)",
+                                     type=["jpg", "jpeg", "png"])
+        if uploaded is not None:
+            img = Image.open(uploaded).convert("RGB")
+            st.image(img, width=300)
+            try:
+                pipe, used_model = load_deepfake_pipe()
+                out = pipe(img)
+                fake_score = sum(p["score"] for p in out if p["label"].lower()
+                                  in ("fake", "deepfake", "ai-generated", "synthetic"))
+                st.metric("Fake score", f"{fake_score:.2f}")
+                st.caption(f"Model: {used_model}")
+                st.json(out)
+            except Exception as e:
+                st.error(f"Model unavailable: {e}")
+
+    else:
+        VOICE_MODEL_IDS = ["MelodyMachine/Deepfake-audio-detection-V2",
+                            "motheecreator/Deepfake-audio-detection"]
+
+        @st.cache_resource(show_spinner="Loading voice-clone model...")
+        def load_voice_pipe():
+            from transformers import pipeline
+            last_err = None
+            for model_id in VOICE_MODEL_IDS:
+                try:
+                    return pipeline("audio-classification", model=model_id), model_id
+                except Exception as e:
+                    last_err = e
+            raise RuntimeError(f"No candidate model loaded. Last error: {last_err}")
+
+        uploaded_audio = st.file_uploader("Upload an audio clip", type=["wav", "mp3", "m4a"])
+        if uploaded_audio is not None:
+            st.audio(uploaded_audio)
+            try:
+                import soundfile as sf
+                audio, sr = sf.read(io.BytesIO(uploaded_audio.getvalue()), dtype="float32", always_2d=False)
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                pipe, used_model = load_voice_pipe()
+                out = pipe({"array": audio, "sampling_rate": sr})
+                clone_score = sum(p["score"] for p in out if p["label"].lower()
+                                   in ("fake", "spoof", "cloned", "synthetic", "ai-generated"))
+                st.metric("Clone score", f"{clone_score:.2f}")
+                st.caption(f"Model: {used_model}")
+                st.json(out)
+            except Exception as e:
+                st.error(f"Model unavailable: {e}")
+
+st.divider()
+st.caption("SparkIntel — SEBI Securities Market TechSprint prototype.")
