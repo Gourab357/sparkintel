@@ -25,11 +25,11 @@ unambiguous fraud as a chain.
 
 ## Free deployment (recommended): Streamlit Community Cloud
 
-This repository now ships a **lean hosted profile** in `requirements.txt` and pins Streamlit's
-runtime to Python 3.11 through `runtime.txt`. It deliberately excludes TensorFlow, PyTorch and
-Hugging Face inference dependencies: on free tiers their combined download and memory footprint is
-a common cause of installation failures. The Trust Verification workflow and the transparent
-Fraud Journey risk engine remain fully usable in this profile.
+This repository now ships a **lean hosted profile** in `requirements.txt`. It deliberately excludes
+TensorFlow, PyTorch and Hugging Face inference dependencies: on free tiers their combined download
+and memory footprint is a common cause of installation failures. The Trust Verification workflow
+and the transparent Fraud Journey risk engine remain fully usable in this profile. When creating a
+Streamlit Cloud app, choose Python 3.12 in **Advanced settings**.
 
 For a laptop, Render paid instance, or another server with at least 4 GB RAM, install
 `requirements-full.txt` to enable the TensorFlow sequence model and the optional transformer-based

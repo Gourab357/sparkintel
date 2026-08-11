@@ -102,8 +102,12 @@ with tab_text:
                 col1, col2 = st.columns([1, 2])
                 with col1:
                     st.metric("Phishing score", f"{score:.2f}")
-                    (st.error if verdict == "LIKELY PHISHING" else
-                     st.warning if verdict == "SUSPICIOUS" else st.success)(verdict)
+                    if verdict == "LIKELY PHISHING":
+                        st.error(verdict)
+                    elif verdict == "SUSPICIOUS":
+                        st.warning(verdict)
+                    else:
+                        st.success(verdict)
                 with col2:
                     st.write("**Phrases driving this score:**")
                     for phrase, contrib in explain_keywords(user_text):
@@ -152,8 +156,10 @@ with tab_trust:
         check_text = st.text_area("Message text received", key="verify_text")
         if st.button("Verify", key="verify_btn"):
             result = registry.verify_message(check_id, check_text, public_keys)
-            (st.success(f"✅ {result['status']} — {result['detail']}") if result["authentic"]
-             else st.error(f"❌ {result['status']} — {result['detail']}"))
+            if result["authentic"]:
+                st.success(f"Verified: {result['status']} - {result['detail']}")
+            else:
+                st.error(f"Not verified: {result['status']} - {result['detail']}")
 
         st.divider()
         st.caption("Try it: register a message above, then paste the *exact* text back here to see "
@@ -254,8 +260,10 @@ with tab_sequence:
                                         "unauthorized_fund_transfer"} for event in fraud_events)
             risk = min(0.98, 0.08 + 0.18 * len(fraud_events) + 0.10 * escalation)
             st.metric("Fraud-campaign score", f"{risk:.3f}")
-            (st.error if risk > 0.5 else st.success)(
-                "LIKELY FRAUD CAMPAIGN" if risk > 0.5 else "LIKELY BENIGN ACTIVITY")
+            if risk > 0.5:
+                st.error("LIKELY FRAUD CAMPAIGN")
+            else:
+                st.success("LIKELY BENIGN ACTIVITY")
             st.write("**Risk drivers:** " + (", ".join(fraud_events) if fraud_events
                      else "no high-risk stages detected"))
 
@@ -313,7 +321,10 @@ with tab_sequence:
                     verdict = "LIKELY FRAUD CAMPAIGN" if prob > 0.5 else "LIKELY BENIGN ACTIVITY"
 
                     st.metric("Fraud-campaign score", f"{prob:.3f}")
-                    (st.error if prob > 0.5 else st.success)(verdict)
+                    if prob > 0.5:
+                        st.error(verdict)
+                    else:
+                        st.success(verdict)
 
                     base = logit(prob)
                     impacts = []
