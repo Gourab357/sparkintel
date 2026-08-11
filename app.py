@@ -9,6 +9,7 @@ Paid/alternative: Hugging Face Spaces with Gradio → use app_gradio.py + requir
 """
 import io
 import os
+import re
 
 import numpy as np
 import streamlit as st
@@ -25,9 +26,32 @@ ARTIFACT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.markdown("""
 <style>
-    .stApp { background: linear-gradient(135deg, #f7faff 0%, #ffffff 48%, #f2f7ff 100%); }
-    [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe7f5; border-radius: 12px; padding: 12px; }
-    .spark-note { border-left: 4px solid #0e7490; padding: .4rem .8rem; background: #eff9ff; }
+    :root { --spark-bg: #f5f8fc; --spark-card: #ffffff; --spark-text: #102a43;
+            --spark-muted: #52677d; --spark-border: #d7e2ee; --spark-accent: #00a6a6; }
+    .stApp { background: var(--spark-bg); color: var(--spark-text); }
+    .block-container { max-width: 1180px; padding-top: 2.2rem; padding-bottom: 3rem; }
+    [data-testid="stMetric"] { background: var(--spark-card); border: 1px solid var(--spark-border);
+        border-radius: 14px; padding: 14px; }
+    [data-testid="stSidebar"] { border-right: 1px solid var(--spark-border); }
+    .spark-hero { background: linear-gradient(120deg, #073b5c, #007c86); color: #fff; padding: 1.5rem;
+        border-radius: 18px; margin-bottom: 1.2rem; box-shadow: 0 10px 28px rgba(4, 72, 94, .18); }
+    .spark-hero h1 { color: #fff !important; font-size: 2.35rem; margin: 0; }
+    .spark-hero p { color: #e7f8fa !important; margin: .35rem 0 0; }
+    .spark-kicker { color: #99eff1 !important; font-size: .75rem; font-weight: 700; letter-spacing: .12em; }
+    .spark-card { background: var(--spark-card); border: 1px solid var(--spark-border); border-radius: 14px;
+        padding: 1rem 1.15rem; margin: .5rem 0 1rem; }
+    .spark-card h3 { margin-top: 0; }
+    .spark-muted { color: var(--spark-muted); }
+    @media (prefers-color-scheme: dark) {
+        :root { --spark-bg: #101923; --spark-card: #182534; --spark-text: #edf6ff;
+                --spark-muted: #b4c4d4; --spark-border: #314558; --spark-accent: #4ddbd8; }
+        .stApp, [data-testid="stAppViewContainer"] { background: var(--spark-bg) !important; color: var(--spark-text) !important; }
+        [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stSidebar"] { background: #111c28 !important; }
+        h1, h2, h3, p, label, [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] { color: var(--spark-text) !important; }
+        [data-baseweb="input"] > div, [data-baseweb="textarea"] > div { background: #213246 !important; color: #fff !important; border-color: #465d73 !important; }
+        [data-baseweb="input"] input, textarea { color: #fff !important; }
+        [data-testid="stFileUploaderDropzone"] { background: #1b2a3a !important; border-color: #486278 !important; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,9 +60,97 @@ def artifact_path(name: str) -> str:
     return os.path.join(ARTIFACT_DIR, name)
 
 
+def fallback_text_analysis(text: str) -> tuple[float, list[str], list[str]]:
+    """Explainable safety screen that needs no downloaded model."""
+    normalized = text.lower()
+    risk_rules = {
+        "urgent|immediately|within \\d+ hours": "Artificial urgency",
+        "kyc|account.{0,20}(freeze|block|suspend)": "Account-threat language",
+        "click|bit\\.ly|tinyurl|https?://": "Link or click-through request",
+        "otp|pin|password|cvv": "Request for sensitive credentials",
+        "guaranteed|assured|risk-free": "Unrealistic investment promise",
+        "whatsapp|telegram": "Unverified social-media channel",
+    }
+    safe_rules = {
+        "do not share.*otp": "Warns against sharing credentials",
+        "official website|investor grievance": "Uses an official support route",
+    }
+    risks = [label for pattern, label in risk_rules.items() if re.search(pattern, normalized)]
+    safeguards = [label for pattern, label in safe_rules.items() if re.search(pattern, normalized)]
+    score = min(0.95, 0.10 + 0.16 * len(risks) - 0.05 * len(safeguards))
+    return score, risks, safeguards
+
+
+def render_text_fallback(note: str) -> None:
+    st.markdown('<div class="spark-card"><h3>Instant message screening</h3><p class="spark-muted">'
+                'Explainable, rule-based triage for the hosted demo. It flags common fraud signals; '
+                'use Trust Verification to confirm an issuer.</p></div>', unsafe_allow_html=True)
+    text = st.text_area("Message text", value=("URGENT: Your KYC has expired. Update immediately "
+                                               "or your trading account will be frozen within 24 hours."),
+                        height=150, key="fallback_text_input")
+    if st.button("Screen message", type="primary", key="fallback_text_button"):
+        score, risks, safeguards = fallback_text_analysis(text)
+        label = "HIGH RISK" if score >= 0.55 else "REVIEW CAREFULLY" if score >= 0.30 else "LOWER RISK"
+        left, right = st.columns([1, 2])
+        with left:
+            st.metric("Screening risk", f"{score:.0%}")
+            if score >= 0.55:
+                st.error(label)
+            elif score >= 0.30:
+                st.warning(label)
+            else:
+                st.success(label)
+        with right:
+            st.write("**Signals found**")
+            for signal in risks or ["No common phishing pattern detected"]:
+                st.write(f"- {signal}")
+            if safeguards:
+                st.caption("Safeguards: " + ", ".join(safeguards))
+        st.info("Recommended action: do not use links or share credentials. Verify the communication ID in the Trust Verification tab.")
+    if note:
+        st.caption(note)
+
+
+def render_image_triage(img: Image.Image) -> None:
+    pixels = np.asarray(img.convert("RGB"), dtype=np.float32)
+    variation = float(pixels.std())
+    metadata_present = bool(img.getexif())
+    st.markdown('<div class="spark-card"><h3>Image intake complete</h3><p class="spark-muted">'
+                'This hosted demo records basic forensic context. It is not a deepfake verdict; '
+                'the full vision model is available only in the dedicated compute profile.</p></div>',
+                unsafe_allow_html=True)
+    a, b, c = st.columns(3)
+    a.metric("Resolution", f"{img.width} x {img.height}")
+    b.metric("Pixel variation", f"{variation:.0f}")
+    c.metric("EXIF metadata", "Present" if metadata_present else "Not present")
+    st.warning("Recommended action: treat unverified market-media as suspicious and verify the underlying issuer communication.")
+
+
+def render_audio_triage(uploaded_audio) -> None:
+    size_kb = len(uploaded_audio.getvalue()) / 1024
+    st.markdown('<div class="spark-card"><h3>Audio intake complete</h3><p class="spark-muted">'
+                'The hosted demo accepts the clip for review. A voice-clone probability requires '
+                'the optional audio model on dedicated compute.</p></div>', unsafe_allow_html=True)
+    st.metric("Uploaded audio", f"{size_kb:.0f} KB")
+    st.warning("Recommended action: do not act on trading instructions delivered by an unverified voice call.")
+
+
 st.title("🛡️ SparkIntel")
 st.caption("AI-Powered Detection of Synthetic Media & Phishing Threats in Securities Markets — "
            "SEBI Securities Market TechSprint prototype")
+
+st.markdown("""
+<div class="spark-hero">
+  <div class="spark-kicker">SEBI TECHSPRINT • INVESTOR PROTECTION</div>
+  <h1>Spot the signal. Verify the source. Protect the investor.</h1>
+  <p>One workspace for screening suspicious market communications, authenticating issuers, and tracing multi-stage fraud.</p>
+</div>
+""", unsafe_allow_html=True)
+
+col_a, col_b, col_c = st.columns(3)
+col_a.metric("Screening", "Text & media")
+col_b.metric("Verification", "Cryptographic")
+col_c.metric("Journey view", "Multi-stage")
 
 tab_text, tab_trust, tab_sequence, tab_media = st.tabs([
     "📧 Text / Circular Check",
@@ -48,9 +160,12 @@ tab_text, tab_trust, tab_sequence, tab_media = st.tabs([
 ])
 
 with st.sidebar:
-    st.header("Demo guide")
-    st.caption("Start with Trust Verification, then show how a multi-stage journey becomes high risk.")
-    st.info("Hosted demo mode keeps the core demo reliable without downloading multi-GB models.")
+    st.header("Investor safety desk")
+    st.caption("A SEBI TechSprint prototype for triage, verification, and investor action.")
+    st.markdown("**Recommended demo flow**")
+    st.markdown("1. Screen a suspicious message\n2. Verify its issuer\n3. Map the fraud journey")
+    st.success("Core modules online")
+    st.caption("Hosted mode uses transparent fallbacks when dedicated ML models are unavailable.")
 
 # =============================================================================
 # TAB 1 — Text / Circular Check  (needs notebook 1's saved .joblib artifacts)
@@ -63,11 +178,7 @@ with tab_text:
     text_artifacts_ok = os.path.exists(artifact_path("phishing_rf_model.joblib"))
 
     if not text_artifacts_ok:
-        st.info(
-            "**Not set up yet.** Run `01_phishing_text_detector.ipynb` in Colab, then copy its "
-            "3 saved `.joblib` files into this folder (alongside `app.py`) and "
-            "redeploy. This tab lights up automatically once they're present."
-        )
+        render_text_fallback("Optional SBERT model artifacts were not uploaded; hosted screening is active.")
     else:
         @st.cache_resource(show_spinner="Loading text models...")
         def load_text_artifacts():
@@ -113,10 +224,8 @@ with tab_text:
                     for phrase, contrib in explain_keywords(user_text):
                         direction = "toward phishing" if contrib > 0 else "toward legitimate"
                         st.write(f"- `{phrase}` — {direction} ({contrib:+.3f})")
-        except Exception as e:
-            st.error(f"Text models failed to load: {e}")
-            st.caption("Check requirements.txt includes sentence-transformers, and that all 3 "
-                       ".joblib files from notebook 1 are in this folder.")
+        except Exception:
+            render_text_fallback("Dedicated text model is unavailable in this hosted profile; explainable screening is active.")
 
 # =============================================================================
 # TAB 2 — Trust Verification
@@ -351,6 +460,8 @@ with tab_media:
     st.subheader("Deepfake Image & Voice Clone Check")
     st.caption("Loads pretrained Hugging Face models directly — no local artifacts needed.")
 
+    st.info("Upload media for a quick intake review. The optional full model produces a deepfake or voice-clone score; "
+            "the free hosted profile shows transparent triage instead of a misleading model error.")
     media_kind = st.radio("Check a:", ["Image", "Audio clip"], horizontal=True)
 
     if media_kind == "Image":
@@ -382,7 +493,7 @@ with tab_media:
                 st.caption(f"Model: {used_model}")
                 st.json(out)
             except Exception as e:
-                st.error(f"Model unavailable: {e}")
+                render_image_triage(img)
 
     else:
         VOICE_MODEL_IDS = ["MelodyMachine/Deepfake-audio-detection-V2",
@@ -415,7 +526,7 @@ with tab_media:
                 st.caption(f"Model: {used_model}")
                 st.json(out)
             except Exception as e:
-                st.error(f"Model unavailable: {e}")
+                render_audio_triage(uploaded_audio)
 
 st.divider()
 st.caption("SparkIntel — SEBI Securities Market TechSprint prototype.")
